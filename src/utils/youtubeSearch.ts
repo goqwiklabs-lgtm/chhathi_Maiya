@@ -100,9 +100,11 @@ async function fetchWithTimeout(url: string, timeoutMs = 5000): Promise<Response
 }
 
 // Fetch single video metadata using noembed + oembed
-export async function fetchVideoMetadata(videoIdOrUrl: string): Promise<YouTubeTrack> {
+export async function fetchVideoMetadata(videoIdOrUrl: string, adminToken = ''): Promise<YouTubeTrack> {
   const videoId = extractYouTubeId(videoIdOrUrl) || videoIdOrUrl.trim();
   if (!videoId) throw new Error('Invalid YouTube video URL or ID.');
+
+  const token = adminToken || (typeof localStorage !== 'undefined' ? localStorage.getItem('chhathi_admin_jwt') || '' : '');
 
   const defaultTrack: YouTubeTrack = {
     id: videoId,
@@ -135,7 +137,8 @@ export async function fetchVideoMetadata(videoIdOrUrl: string): Promise<YouTubeT
 
   // 2. Try Backend PHP fetch_video_meta
   try {
-    const res = await fetchWithTimeout(`./api/admin.php?action=fetch_video_meta&v=${encodeURIComponent(videoId)}`, 4000);
+    const url = `./api/admin.php?action=fetch_video_meta&v=${encodeURIComponent(videoId)}${token ? `&token=${encodeURIComponent(token)}` : ''}`;
+    const res = await fetchWithTimeout(url, 4000);
     if (res.ok) {
       const data = await res.json();
       if (data.success && data.track) {
@@ -147,12 +150,49 @@ export async function fetchVideoMetadata(videoIdOrUrl: string): Promise<YouTubeT
   return defaultTrack;
 }
 
-// Search YouTube videos
+// Search YouTube videos using 3rd party Invidious API & Backend Fallbacks
 export async function searchYouTubeVideos(query: string, adminToken = ''): Promise<YouTubeTrack[]> {
   const q = query.trim();
   if (!q) return [];
 
-  // 1. Try Backend PHP YouTube Search (fastest & no CORS issues)
+  // 1. Direct Invidious 3rd-party Search API (As requested: invidious.f5.si)
+  const invidiousInstances = [
+    'https://invidious.f5.si',
+    'https://inv.tux.pizza',
+    'https://vid.puffyan.us',
+    'https://invidious.private.coffee'
+  ];
+
+  for (const inst of invidiousInstances) {
+    try {
+      const res = await fetchWithTimeout(`${inst}/api/v1/search?q=${encodeURIComponent(q)}&type=video`, 5000);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const list = data
+            .filter((item: any) => item.videoId)
+            .slice(0, 30)
+            .map((item: any) => {
+              const dur = Number(item.lengthSeconds || 210);
+              return {
+                id: item.videoId,
+                youtubeId: item.videoId,
+                title: cleanTitle(item.title || 'छठ पूजा गीत'),
+                titleEn: cleanTitle(item.title || 'Chhath Puja Song'),
+                artist: cleanTitle(item.author || 'Chhathi Maiya Bhakti'),
+                duration: dur,
+                durationFormatted: formatDuration(dur),
+                coverUrl: `https://i.ytimg.com/vi/${item.videoId}/hqdefault.jpg`,
+                youtubeMusicUrl: `https://music.youtube.com/watch?v=${item.videoId}`
+              };
+            });
+          if (list.length > 0) return list;
+        }
+      }
+    } catch {}
+  }
+
+  // 2. Try Backend PHP YouTube Search (which also proxies Invidious)
   try {
     const url = `./api/admin.php?action=search_youtube&q=${encodeURIComponent(q)}${adminToken ? `&token=${encodeURIComponent(adminToken)}` : ''}`;
     const res = await fetchWithTimeout(url, 5000);

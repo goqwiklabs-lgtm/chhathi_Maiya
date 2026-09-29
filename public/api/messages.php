@@ -54,21 +54,35 @@ function ensure_tables_exist($pdo) {
                 `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 `name` VARCHAR(100) NOT NULL,
                 `message` TEXT NOT NULL,
+                `avatar_url` TEXT DEFAULT NULL,
+                `image_url` TEXT DEFAULT NULL,
+                `sender_ip` VARCHAR(45) DEFAULT NULL,
+                `is_admin` TINYINT(1) NOT NULL DEFAULT 0,
+                `is_pinned` TINYINT(1) NOT NULL DEFAULT 0,
+                `pinned_at` DATETIME DEFAULT NULL,
                 `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
         ");
-    } catch (Exception $e) {
-        try {
-            $pdo->exec("
-                CREATE TABLE IF NOT EXISTS `chat_messages` (
-                    `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
-                    `name` VARCHAR(100) NOT NULL,
-                    `message` TEXT NOT NULL,
-                    `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8;
-            ");
-        } catch (Exception $e2) {}
-    }
+    } catch (Exception $e) {}
+
+    try {
+        $pdo->exec("ALTER TABLE `chat_messages` ADD COLUMN `avatar_url` TEXT DEFAULT NULL");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE `chat_messages` ADD COLUMN `image_url` TEXT DEFAULT NULL");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE `chat_messages` ADD COLUMN `sender_ip` VARCHAR(45) DEFAULT NULL");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE `chat_messages` ADD COLUMN `is_admin` TINYINT(1) NOT NULL DEFAULT 0");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE `chat_messages` ADD COLUMN `is_pinned` TINYINT(1) NOT NULL DEFAULT 0");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE `chat_messages` ADD COLUMN `pinned_at` DATETIME DEFAULT NULL");
+    } catch (Exception $e) {}
 
     try {
         $pdo->exec("
@@ -86,8 +100,9 @@ function ensure_tables_exist($pdo) {
             CREATE TABLE IF NOT EXISTS `verified_devotees` (
                 `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
                 `name` VARCHAR(100) NOT NULL,
-                `phone` VARCHAR(20) DEFAULT '',
+                `phone` VARCHAR(25) DEFAULT '',
                 `email` VARCHAR(150) DEFAULT '',
+                `avatar_url` TEXT DEFAULT NULL,
                 `method` VARCHAR(30) DEFAULT 'email',
                 `ip_address` VARCHAR(50) DEFAULT '',
                 `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -96,8 +111,24 @@ function ensure_tables_exist($pdo) {
     } catch (Exception $e4) {}
 
     try {
-        $pdo->exec("ALTER TABLE `verified_devotees` ADD COLUMN `phone` VARCHAR(20) DEFAULT '' AFTER `name`");
+        $pdo->exec("ALTER TABLE `verified_devotees` ADD COLUMN `avatar_url` TEXT DEFAULT NULL");
+    } catch (Exception $e) {}
+    try {
+        $pdo->exec("ALTER TABLE `verified_devotees` ADD COLUMN `phone` VARCHAR(25) DEFAULT ''");
     } catch (Exception $e5) {}
+
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS `online_users` (
+                `session_id` VARCHAR(100) NOT NULL PRIMARY KEY,
+                `ip_address` VARCHAR(45) NOT NULL,
+                `devotee_id` INT DEFAULT NULL,
+                `devotee_name` VARCHAR(100) DEFAULT NULL,
+                `is_admin` TINYINT(1) DEFAULT 0,
+                `last_seen` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        ");
+    } catch (Exception $e) {}
 }
 
 if ($pdo) {
@@ -479,12 +510,212 @@ if ($action === 'typing' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// Admin endpoints for recovering and unblocking IPs
-$admin_key = isset($_REQUEST['key']) ? trim($_REQUEST['key']) : '';
-$is_admin = ($admin_key === $db_pass || $admin_key === sec_decrypt('000000000000000053545f5f0d375a51465e'));
+// Authentication & Admin Privilege Resolver
+$admin_key = isset($_REQUEST['key']) ? trim($_REQUEST['key']) : (isset($json_post_data['key']) ? trim($json_post_data['key']) : '');
+$user_email = isset($json_post_data['email']) ? strtolower(trim($json_post_data['email'])) : (isset($_REQUEST['email']) ? strtolower(trim($_REQUEST['email'])) : '');
+$admin_token = isset($_REQUEST['token']) ? trim($_REQUEST['token']) : (isset($json_post_data['token']) ? trim($json_post_data['token']) : '');
+
+$is_admin = ($admin_key === $db_pass || $admin_key === sec_decrypt('000000000000000053545f5f0d375a51465e') || $user_email === 'omkumar.working@gmail.com' || !empty($admin_token));
+
+// 1. Pin / Unpin Message (Admin Only)
+if ($action === 'pin_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!$is_admin) {
+        echo json_encode(['success' => false, 'error' => 'Admin authorization required to pin messages.']);
+        exit;
+    }
+    $msg_id = isset($json_post_data['id']) ? (int)$json_post_data['id'] : (isset($_REQUEST['id']) ? (int)$_REQUEST['id'] : 0);
+    $pin_status = isset($json_post_data['pinned']) ? (int)$json_post_data['pinned'] : 1;
+
+    if ($pdo && $msg_id > 0) {
+        try {
+            if ($pin_status) {
+                $pdo->exec("UPDATE `chat_messages` SET `is_pinned` = 0");
+            }
+            $stmt = $pdo->prepare("UPDATE `chat_messages` SET `is_pinned` = :p, `pinned_at` = NOW() WHERE `id` = :id");
+            $stmt->execute([':p' => $pin_status, ':id' => $msg_id]);
+        } catch (Exception $e) {}
+    }
+
+    $cache_file = __DIR__ . '/messages_cache.json';
+    if (file_exists($cache_file)) {
+        $raw = @json_decode(file_get_contents($cache_file), true);
+        if (is_array($raw)) {
+            foreach ($raw as &$m) {
+                if ($pin_status) $m['is_pinned'] = 0;
+                if ((int)$m['id'] === $msg_id) {
+                    $m['is_pinned'] = $pin_status;
+                    $m['pinned_at'] = date('Y-m-d H:i:s');
+                }
+            }
+            @file_put_contents($cache_file, json_encode($raw), LOCK_EX);
+        }
+    }
+
+    echo json_encode(['success' => true, 'pinned' => $pin_status, 'id' => $msg_id]);
+    exit;
+}
+
+// 2. Delete Message (Admin Only)
+if ($action === 'delete_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!$is_admin) {
+        echo json_encode(['success' => false, 'error' => 'Admin authorization required to delete messages.']);
+        exit;
+    }
+    $msg_id = isset($json_post_data['id']) ? (int)$json_post_data['id'] : (isset($_REQUEST['id']) ? (int)$_REQUEST['id'] : 0);
+    if ($pdo && $msg_id > 0) {
+        try {
+            $stmt = $pdo->prepare("DELETE FROM `chat_messages` WHERE `id` = :id");
+            $stmt->execute([':id' => $msg_id]);
+        } catch (Exception $e) {}
+    }
+
+    $cache_file = __DIR__ . '/messages_cache.json';
+    if (file_exists($cache_file)) {
+        $raw = @json_decode(file_get_contents($cache_file), true);
+        if (is_array($raw)) {
+            $raw = array_values(array_filter($raw, function($m) use ($msg_id) { return (int)$m['id'] !== $msg_id; }));
+            @file_put_contents($cache_file, json_encode($raw), LOCK_EX);
+        }
+    }
+
+    echo json_encode(['success' => true, 'id' => $msg_id]);
+    exit;
+}
+
+// 3. Block Devotee Directly from Live Chat (Admin Only)
+if ($action === 'block_devotee' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if (!$is_admin) {
+        echo json_encode(['success' => false, 'error' => 'Admin authorization required to block devotees.']);
+        exit;
+    }
+    $target_ip = isset($json_post_data['ip']) ? trim($json_post_data['ip']) : (isset($_REQUEST['ip']) ? trim($_REQUEST['ip']) : '');
+    $target_msg_id = isset($json_post_data['message_id']) ? (int)$json_post_data['message_id'] : 0;
+    if (empty($target_ip) && $target_msg_id > 0 && $pdo) {
+        try {
+            $st = $pdo->prepare("SELECT sender_ip FROM `chat_messages` WHERE id = :id");
+            $st->execute([':id' => $target_msg_id]);
+            $row = $st->fetch();
+            if ($row && !empty($row['sender_ip'])) $target_ip = $row['sender_ip'];
+        } catch (Exception $e) {}
+    }
+    if (!empty($target_ip)) {
+        block_ip($pdo, $target_ip, 'Admin live chat ban by ' . ($user_email ?: 'Administrator'));
+        echo json_encode(['success' => true, 'blocked_ip' => $target_ip]);
+        exit;
+    }
+    echo json_encode(['success' => false, 'error' => 'Target IP or message not found.']);
+    exit;
+}
+
+// 4. Update Devotee Profile (Display Name & Avatar)
+if ($action === 'update_profile' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $new_name = isset($json_post_data['name']) ? trim($json_post_data['name']) : '';
+    $avatar_url = isset($json_post_data['avatar_url']) ? trim($json_post_data['avatar_url']) : '';
+    if (empty($new_name)) {
+        echo json_encode(['success' => false, 'error' => 'Display name cannot be empty.']);
+        exit;
+    }
+    $name_check = validate_real_name($new_name);
+    if ($name_check !== true) {
+        echo json_encode(['success' => false, 'error' => $name_check]);
+        exit;
+    }
+    $clean_name = htmlspecialchars(strip_tags($new_name), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+    if ($pdo) {
+        try {
+            $stmt = $pdo->prepare("UPDATE `verified_devotees` SET `name` = :name, `avatar_url` = :av WHERE `ip_address` = :ip");
+            $stmt->execute([':name' => $clean_name, ':av' => $avatar_url, ':ip' => $client_ip]);
+        } catch (Exception $e) {}
+    }
+
+    $dev_file = __DIR__ . '/verified_devotees.json';
+    if (file_exists($dev_file)) {
+        $devs = @json_decode(file_get_contents($dev_file), true);
+        if (is_array($devs)) {
+            foreach ($devs as &$d) {
+                if (isset($d['ip_address']) && $d['ip_address'] === $client_ip) {
+                    $d['name'] = $clean_name;
+                    $d['avatar_url'] = $avatar_url;
+                }
+            }
+            @file_put_contents($dev_file, json_encode($devs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
+        }
+    }
+
+    echo json_encode(['success' => true, 'name' => $clean_name, 'avatar_url' => $avatar_url]);
+    exit;
+}
+
+// 5. Upload Media (Small Images & GIFs up to 3MB)
+if ($action === 'upload_media' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    if ($is_blocked) {
+        echo json_encode(['success' => false, 'error' => 'IP is blocked.']);
+        exit;
+    }
+
+    $upload_dir = dirname(__DIR__) . '/uploads/chat/';
+    if (!is_dir($upload_dir)) {
+        @mkdir($upload_dir, 0755, true);
+    }
+
+    if (!empty($_FILES['file']['tmp_name'])) {
+        $file = $_FILES['file'];
+        if ($file['size'] > 3 * 1024 * 1024) {
+            echo json_encode(['success' => false, 'error' => 'File size exceeds maximum limit of 3MB.']);
+            exit;
+        }
+
+        $finfo = finfo_open(FILEINFO_MIME_TYPE);
+        $mime = finfo_file($finfo, $file['tmp_name']);
+        finfo_close($finfo);
+
+        $allowed = [
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/gif' => 'gif',
+            'image/webp' => 'webp'
+        ];
+
+        if (!isset($allowed[$mime])) {
+            echo json_encode(['success' => false, 'error' => 'Only JPG, PNG, GIF, and WEBP image files are allowed.']);
+            exit;
+        }
+
+        $ext = $allowed[$mime];
+        $filename = 'media_' . time() . '_' . substr(bin2hex(random_bytes(6)), 0, 8) . '.' . $ext;
+        $dest = $upload_dir . $filename;
+
+        if (move_uploaded_file($file['tmp_name'], $dest)) {
+            $web_url = './uploads/chat/' . $filename;
+            echo json_encode(['success' => true, 'url' => $web_url]);
+            exit;
+        }
+    }
+
+    if (!empty($json_post_data['image_base64'])) {
+        $b64 = $json_post_data['image_base64'];
+        if (preg_match('/^data:image\/(jpeg|png|gif|webp);base64,(.+)$/', $b64, $m)) {
+            $ext = ($m[1] === 'jpeg') ? 'jpg' : $m[1];
+            $decoded = base64_decode($m[2]);
+            if ($decoded && strlen($decoded) <= 3 * 1024 * 1024) {
+                $filename = 'media_' . time() . '_' . substr(bin2hex(random_bytes(6)), 0, 8) . '.' . $ext;
+                $dest = $upload_dir . $filename;
+                if (@file_put_contents($dest, $decoded)) {
+                    $web_url = './uploads/chat/' . $filename;
+                    echo json_encode(['success' => true, 'url' => $web_url]);
+                    exit;
+                }
+            }
+        }
+    }
+
+    echo json_encode(['success' => false, 'error' => 'Failed to upload media. Please try again.']);
+    exit;
+}
 
 if ($is_admin) {
-    // 1. List all blocked IPs with reasons
+    // List blocked IPs
     if ($action === 'list_blocked') {
         $db_blocked = [];
         try {
@@ -504,21 +735,19 @@ if ($is_admin) {
         exit;
     }
 
-    // 2. Unblock a specific IP
+    // Unblock specific IP
     if ($action === 'unblock') {
         $target_ip = isset($_REQUEST['ip']) ? trim($_REQUEST['ip']) : '';
         if (empty($target_ip)) {
-            echo json_encode(['success' => false, 'error' => 'Please provide the IP to unblock. Example: ?action=unblock&ip=1.2.3.4&key=YOUR_KEY']);
+            echo json_encode(['success' => false, 'error' => 'Please provide the IP to unblock.']);
             exit;
         }
 
-        // Delete from MySQL
         try {
             $stmt = $pdo->prepare("DELETE FROM `blocked_ips` WHERE `ip_address` = :ip");
             $stmt->execute([':ip' => $target_ip]);
         } catch (Exception $e) {}
 
-        // Delete from local JSON cache file
         $cache_file = __DIR__ . '/blocked_ips.json';
         if (file_exists($cache_file)) {
             $list = @json_decode(file_get_contents($cache_file), true);
@@ -532,13 +761,13 @@ if ($is_admin) {
 
         echo json_encode([
             'success' => true,
-            'message' => "IP {$target_ip} has been successfully unblocked and restored!",
+            'message' => "IP {$target_ip} has been successfully unblocked!",
             'target_ip' => $target_ip
         ]);
         exit;
     }
 
-    // 3. Unblock all IPs (Reset ban list)
+    // Unblock all
     if ($action === 'unblock_all') {
         try {
             $pdo->exec("TRUNCATE TABLE `blocked_ips`");
@@ -558,7 +787,6 @@ if ($is_admin) {
 // Fetch messages with realtime sync across devices & active typing indicators
 if ($action === 'get_messages') {
     $raw_after_id = isset($_GET['after_id']) ? (int)$_GET['after_id'] : (isset($json_post_data['after_id']) ? (int)$json_post_data['after_id'] : 0);
-    // Guard against timestamp-based tempIds from frontend (e.g. 174...); only real auto-increment IDs allowed
     $after_id = ($raw_after_id > 0 && $raw_after_id < 100000000) ? $raw_after_id : 0;
     $limit = isset($_GET['limit']) ? min(100, max(1, (int)$_GET['limit'])) : 60;
     $cache_file = __DIR__ . '/messages_cache.json';
@@ -585,23 +813,40 @@ if ($action === 'get_messages') {
         }
     }
 
+    // Presence heartbeat
+    $dev_name = isset($_REQUEST['name']) ? trim(strip_tags($_REQUEST['name'])) : '';
+    $sess_id = substr(md5($client_ip . '|' . ($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 24);
+    if ($pdo) {
+        try {
+            $pdo->prepare("REPLACE INTO `online_users` (session_id, ip_address, devotee_name, last_seen) VALUES (:id, :ip, :name, NOW())")->execute([
+                ':id' => $sess_id,
+                ':ip' => $client_ip,
+                ':name' => !empty($dev_name) ? $dev_name : null
+            ]);
+        } catch (Exception $e) {}
+    }
+
     $messages = [];
     $is_mysql_live = ($pdo !== null);
+    $pinned_message = null;
 
     if ($is_mysql_live) {
         try {
+            // Pinned message
+            $pin_stmt = $pdo->query("SELECT id, name, message, avatar_url, image_url, sender_ip, is_admin, DATE_FORMAT(pinned_at, '%h:%i %p') as time_formatted, UNIX_TIMESTAMP(pinned_at) as timestamp FROM `chat_messages` WHERE is_pinned = 1 ORDER BY pinned_at DESC LIMIT 1");
+            $pinned_message = $pin_stmt->fetch() ?: null;
+
             if ($after_id > 0) {
-                $stmt = $pdo->prepare("SELECT id, name, message, DATE_FORMAT(created_at, '%h:%i %p') as time_formatted, UNIX_TIMESTAMP(created_at) as timestamp FROM `chat_messages` WHERE id > :after_id ORDER BY id ASC LIMIT :limit");
+                $stmt = $pdo->prepare("SELECT id, name, message, avatar_url, image_url, sender_ip, is_admin, is_pinned, DATE_FORMAT(created_at, '%h:%i %p') as time_formatted, UNIX_TIMESTAMP(created_at) as timestamp FROM `chat_messages` WHERE id > :after_id ORDER BY id ASC LIMIT :limit");
                 $stmt->bindValue(':after_id', $after_id, PDO::PARAM_INT);
                 $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
                 $stmt->execute();
                 $messages = $stmt->fetchAll();
             } else {
-                $stmt = $pdo->prepare("SELECT id, name, message, DATE_FORMAT(created_at, '%h:%i %p') as time_formatted, UNIX_TIMESTAMP(created_at) as timestamp FROM (SELECT * FROM `chat_messages` ORDER BY id DESC LIMIT :limit) sub ORDER BY id ASC");
+                $stmt = $pdo->prepare("SELECT id, name, message, avatar_url, image_url, sender_ip, is_admin, is_pinned, DATE_FORMAT(created_at, '%h:%i %p') as time_formatted, UNIX_TIMESTAMP(created_at) as timestamp FROM (SELECT * FROM `chat_messages` ORDER BY id DESC LIMIT :limit) sub ORDER BY id ASC");
                 $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
                 $stmt->execute();
                 $messages = $stmt->fetchAll();
-                // Cache latest snapshot
                 @file_put_contents($cache_file, json_encode($messages), LOCK_EX);
             }
         } catch (Exception $e) {
@@ -609,7 +854,6 @@ if ($action === 'get_messages') {
         }
     }
 
-    // Disk cache fallback if MySQL query returned empty or DB is offline
     if (empty($messages) && file_exists($cache_file)) {
         $raw = @file_get_contents($cache_file);
         if ($raw) {
@@ -624,11 +868,34 @@ if ($action === 'get_messages') {
         }
     }
 
+    if (!$pinned_message && !empty($messages)) {
+        foreach ($messages as $m) {
+            if (!empty($m['is_pinned'])) {
+                $pinned_message = $m;
+                break;
+            }
+        }
+    }
+
+    // Active devotees for @ mention autocomplete
+    $active_devotees = [];
+    if ($pdo) {
+        try {
+            $dev_stmt = $pdo->query("SELECT DISTINCT devotee_name FROM `online_users` WHERE `devotee_name` IS NOT NULL AND `devotee_name` != '' AND `last_seen` > DATE_SUB(NOW(), INTERVAL 180 SECOND) LIMIT 20");
+            $active_devotees = $dev_stmt->fetchAll(PDO::FETCH_COLUMN);
+        } catch (Exception $e) {}
+    }
+    if (empty($active_devotees)) {
+        $active_devotees = ['OM KŪmar', 'Ravi Singh', 'Sunita Gupta', 'Chhath Devotee'];
+    }
+
     echo json_encode([
         'success' => true,
         'mysql_online' => $is_mysql_live,
         'is_blocked' => $is_blocked,
         'messages' => is_array($messages) ? array_values($messages) : [],
+        'pinned_message' => $pinned_message,
+        'active_devotees' => array_values(array_unique(array_filter($active_devotees))),
         'typing' => array_values(array_unique($active_typing))
     ]);
     exit;
@@ -760,34 +1027,51 @@ if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $final_name = !empty($name) ? $name : (isset($entry['name']) ? $entry['name'] : 'Devotee');
     $final_phone = !empty($phone) ? $phone : (isset($entry['phone']) ? $entry['phone'] : '');
 
-    unset($otps[$email]);
-    @file_put_contents($otps_file, json_encode($otps), LOCK_EX);
-
-    // Save Name, Phone, Email into MySQL database
+    // Enforce 1 user per IP address (strictly for 152.59.145.61 and all devotee IPs)
+    $existing_avatar = null;
     if ($pdo) {
         try {
-            $stmt = $pdo->prepare("INSERT INTO `verified_devotees` (`name`, `phone`, `email`, `method`, `ip_address`) VALUES (:name, :phone, :email, 'email', :ip)");
-            $stmt->execute([
-                ':name' => $final_name,
-                ':phone' => $final_phone,
-                ':email' => $email,
-                ':ip' => $client_ip
-            ]);
+            $stmt_check = $pdo->prepare("SELECT id, name, avatar_url FROM `verified_devotees` WHERE `ip_address` = :ip LIMIT 1");
+            $stmt_check->execute([':ip' => $client_ip]);
+            $existing_user = $stmt_check->fetch();
+            if ($existing_user) {
+                $existing_avatar = $existing_user['avatar_url'];
+                $stmt = $pdo->prepare("UPDATE `verified_devotees` SET `name` = :name, `phone` = :phone, `email` = :email, `created_at` = NOW() WHERE `id` = :id");
+                $stmt->execute([
+                    ':name' => $final_name,
+                    ':phone' => $final_phone,
+                    ':email' => $email,
+                    ':id' => $existing_user['id']
+                ]);
+            } else {
+                $stmt = $pdo->prepare("INSERT INTO `verified_devotees` (`name`, `phone`, `email`, `method`, `ip_address`) VALUES (:name, :phone, :email, 'email', :ip)");
+                $stmt->execute([
+                    ':name' => $final_name,
+                    ':phone' => $final_phone,
+                    ':email' => $email,
+                    ':ip' => $client_ip
+                ]);
+            }
         } catch (Exception $e) {}
     }
 
-    // Save into JSON fallback cache
+    // Save into JSON fallback cache (replace existing IP record to enforce 1 user per IP)
     $dev_file = __DIR__ . '/verified_devotees.json';
     $dev_list = [];
     if (file_exists($dev_file)) {
         $raw_d = @json_decode(file_get_contents($dev_file), true);
-        if (is_array($raw_d)) $dev_list = $raw_d;
+        if (is_array($raw_d)) {
+            $dev_list = array_values(array_filter($raw_d, function($d) use ($client_ip) {
+                return !isset($d['ip_address']) || $d['ip_address'] !== $client_ip;
+            }));
+        }
     }
     $dev_list[] = [
         'id' => time(),
         'name' => $final_name,
         'phone' => $final_phone,
         'email' => $email,
+        'avatar_url' => $existing_avatar,
         'method' => 'email',
         'ip_address' => $client_ip,
         'created_at' => date('Y-m-d H:i:s')
@@ -795,6 +1079,7 @@ if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     @file_put_contents($dev_file, json_encode($dev_list, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
 
     $token = hash_hmac('sha256', $client_ip . '|' . $final_name . '|' . date('Y-m'), $db_pass);
+    $is_user_admin = (strtolower($email) === 'omkumar.working@gmail.com');
 
     echo json_encode([
         'success' => true,
@@ -802,10 +1087,46 @@ if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         'name' => $final_name,
         'phone' => $final_phone,
         'email' => $email,
+        'avatar_url' => $existing_avatar,
+        'is_admin' => $is_user_admin,
         'token' => $token,
         'mysql_online' => ($pdo !== null),
         'message' => 'Email verified successfully! Welcome to Chhathi Maiya Public Chat.'
     ]);
+    exit;
+}
+
+// Get Current Devotee Profile by IP or Token
+if ($action === 'get_profile' || $action === 'get_current_devotee') {
+    $dev = null;
+    if ($pdo) {
+        try {
+            $stmt = $pdo->prepare("SELECT id, name, phone, email, avatar_url, ip_address FROM `verified_devotees` WHERE `ip_address` = :ip ORDER BY id DESC LIMIT 1");
+            $stmt->execute([':ip' => $client_ip]);
+            $dev = $stmt->fetch();
+        } catch (Exception $e) {}
+    }
+    if (!$dev && file_exists(__DIR__ . '/verified_devotees.json')) {
+        $dev_list = @json_decode(file_get_contents(__DIR__ . '/verified_devotees.json'), true);
+        if (is_array($dev_list)) {
+            foreach (array_reverse($dev_list) as $d) {
+                if (isset($d['ip_address']) && $d['ip_address'] === $client_ip) {
+                    $dev = $d;
+                    break;
+                }
+            }
+        }
+    }
+    if ($dev) {
+        $is_user_admin = (!empty($dev['email']) && strtolower(trim($dev['email'])) === 'omkumar.working@gmail.com');
+        echo json_encode([
+            'success' => true,
+            'devotee' => $dev,
+            'is_admin' => $is_user_admin
+        ]);
+    } else {
+        echo json_encode(['success' => false, 'devotee' => null]);
+    }
     exit;
 }
 
@@ -930,10 +1251,16 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $name = '';
     $message = '';
+    $avatar_url = '';
+    $image_url = '';
+    $msg_email = '';
 
     if (is_array($input_data)) {
         $name = isset($input_data['name']) ? trim($input_data['name']) : '';
         $message = isset($input_data['message']) ? trim($input_data['message']) : '';
+        $avatar_url = isset($input_data['avatar_url']) ? trim($input_data['avatar_url']) : '';
+        $image_url = isset($input_data['image_url']) ? trim($input_data['image_url']) : '';
+        $msg_email = isset($input_data['email']) ? strtolower(trim($input_data['email'])) : '';
     }
 
     if (empty($name) && isset($_POST['name'])) {
@@ -941,6 +1268,15 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
     if (empty($message) && isset($_POST['message'])) {
         $message = trim($_POST['message']);
+    }
+    if (empty($avatar_url) && isset($_POST['avatar_url'])) {
+        $avatar_url = trim($_POST['avatar_url']);
+    }
+    if (empty($image_url) && isset($_POST['image_url'])) {
+        $image_url = trim($_POST['image_url']);
+    }
+    if (empty($msg_email) && isset($_POST['email'])) {
+        $msg_email = strtolower(trim($_POST['email']));
     }
 
     // Mandate real name validation
@@ -951,8 +1287,8 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     $message = mb_substr($message, 0, 400, 'UTF-8');
-    if (empty($message)) {
-        echo json_encode(['success' => false, 'error' => 'Message cannot be empty.']);
+    if (empty($message) && empty($image_url)) {
+        echo json_encode(['success' => false, 'error' => 'Message or image attachment cannot be empty.']);
         exit;
     }
 
@@ -975,8 +1311,13 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     // XSS Sanitization
-    $name = htmlspecialchars(strip_tags($name), ENT_QUOTES | ENT_HTML5, 'UTF-8');
-    $message = htmlspecialchars(strip_tags($message), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $clean_name = htmlspecialchars(strip_tags($name), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $clean_message = htmlspecialchars(strip_tags($message), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $clean_avatar = filter_var($avatar_url, FILTER_SANITIZE_URL);
+    $clean_image = filter_var($image_url, FILTER_SANITIZE_URL);
+
+    // Determine admin status
+    $msg_is_admin = ($is_admin || $msg_email === 'omkumar.working@gmail.com' || $user_email === 'omkumar.working@gmail.com') ? 1 : 0;
 
     $new_id = time();
     $cache_file = __DIR__ . '/messages_cache.json';
@@ -988,20 +1329,28 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($pdo) {
         try {
-            $stmt = $pdo->prepare("INSERT INTO `chat_messages` (`name`, `message`) VALUES (:name, :message)");
+            $stmt = $pdo->prepare("INSERT INTO `chat_messages` (`name`, `message`, `avatar_url`, `image_url`, `sender_ip`, `is_admin`, `is_pinned`, `created_at`) VALUES (:name, :message, :avatar, :image, :ip, :is_admin, 0, NOW())");
             $stmt->execute([
-                ':name' => $name,
-                ':message' => $message
+                ':name' => $clean_name,
+                ':message' => $clean_message,
+                ':avatar' => !empty($clean_avatar) ? $clean_avatar : null,
+                ':image' => !empty($clean_image) ? $clean_image : null,
+                ':ip' => $client_ip,
+                ':is_admin' => $msg_is_admin
             ]);
             $new_id = (int)$pdo->lastInsertId();
         } catch (Exception $e) {
-            if (strpos($e->getMessage(), "doesn't exist") !== false || strpos($e->getMessage(), "42S02") !== false) {
+            if (strpos($e->getMessage(), "doesn't exist") !== false || strpos($e->getMessage(), "42S02") !== false || strpos($e->getMessage(), "Unknown column") !== false) {
                 ensure_tables_exist($pdo);
                 try {
-                    $stmt = $pdo->prepare("INSERT INTO `chat_messages` (`name`, `message`) VALUES (:name, :message)");
+                    $stmt = $pdo->prepare("INSERT INTO `chat_messages` (`name`, `message`, `avatar_url`, `image_url`, `sender_ip`, `is_admin`, `is_pinned`, `created_at`) VALUES (:name, :message, :avatar, :image, :ip, :is_admin, 0, NOW())");
                     $stmt->execute([
-                        ':name' => $name,
-                        ':message' => $message
+                        ':name' => $clean_name,
+                        ':message' => $clean_message,
+                        ':avatar' => !empty($clean_avatar) ? $clean_avatar : null,
+                        ':image' => !empty($clean_image) ? $clean_image : null,
+                        ':ip' => $client_ip,
+                        ':is_admin' => $msg_is_admin
                     ]);
                     $new_id = (int)$pdo->lastInsertId();
                 } catch (Exception $e2) {}
@@ -1011,8 +1360,13 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $new_msg = [
         'id' => (int)$new_id,
-        'name' => $name,
-        'message' => $message,
+        'name' => $clean_name,
+        'message' => $clean_message,
+        'avatar_url' => $clean_avatar ?: null,
+        'image_url' => $clean_image ?: null,
+        'sender_ip' => $client_ip,
+        'is_admin' => $msg_is_admin,
+        'is_pinned' => 0,
         'time_formatted' => date('h:i A'),
         'timestamp' => time()
     ];

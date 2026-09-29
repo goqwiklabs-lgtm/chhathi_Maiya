@@ -164,16 +164,54 @@ export const AdminPanel: React.FC = () => {
   const [ytError, setYtError] = useState<string | null>(null);
   const [addingTrackIds, setAddingTrackIds] = useState<Record<string, boolean>>({});
   const [isAddingAllPlaylist, setIsAddingAllPlaylist] = useState(false);
+  const [isFetchingMeta, setIsFetchingMeta] = useState(false);
+  const [fetchedMetaTrack, setFetchedMetaTrack] = useState<YouTubeTrack | null>(null);
 
-  // Auto-parse YouTube details from URL
-  const handleSongUrlChange = (url: string) => {
+  // Auto-parse and autofetch YouTube details from URL via NoEmbed / routes
+  const handleSongUrlChange = async (url: string) => {
     setSongUrl(url);
-    const regExp = /(?:youtube\.com\/(?:watch\?v=|embed\/|v\/|shorts\/)|youtu\.be\/|music\.youtube\.com\/watch\?v=)([a-zA-Z0-9_\-]{11})/;
-    const match = url.match(regExp);
-    if (match && match[1]) {
-      // Auto-populate english title if empty
-      if (!songTitleEn) {
-        setSongTitleEn('Chhath Puja Song');
+    const trimmed = url.trim();
+    if (!trimmed) {
+      setFetchedMetaTrack(null);
+      return;
+    }
+
+    const videoId = extractYouTubeId(trimmed);
+    const playlistId = extractYouTubePlaylistId(trimmed);
+
+    if (playlistId) {
+      setIsFetchingMeta(true);
+      try {
+        const pl = await fetchPlaylistTracks(playlistId, token);
+        if (pl && pl.tracks.length > 0) {
+          setSongTitle(pl.title || 'Chhath Puja Playlist');
+          setSongTitleEn(pl.title || 'Chhath Puja Playlist');
+          setSongArtist('Chhathi Maiya Artists');
+          setSongDuration(`${pl.tracks.length} Songs`);
+        }
+      } catch (e) {
+        console.warn('Playlist autofetch error:', e);
+      } finally {
+        setIsFetchingMeta(false);
+      }
+      return;
+    }
+
+    if (videoId) {
+      setIsFetchingMeta(true);
+      try {
+        const meta = await fetchVideoMetadata(videoId);
+        if (meta) {
+          setFetchedMetaTrack(meta);
+          setSongTitle(meta.title || 'छठ पूजा गीत');
+          setSongTitleEn(meta.titleEn || meta.title || 'Chhath Puja Song');
+          setSongArtist(meta.artist || 'Chhathi Maiya Bhakti');
+          setSongDuration(meta.durationFormatted || '5:00');
+        }
+      } catch (err) {
+        console.warn('Video autofetch error:', err);
+      } finally {
+        setIsFetchingMeta(false);
       }
     }
   };
@@ -1382,6 +1420,28 @@ export const AdminPanel: React.FC = () => {
                   className="w-full px-3.5 py-2.5 rounded-xl bg-white/5 border border-white/15 text-xs text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-amber-400"
                 />
               </div>
+
+              {isFetchingMeta && (
+                <div className="flex items-center gap-2 p-2.5 rounded-xl bg-amber-400/10 border border-amber-400/20 text-xs text-amber-300">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Autofetching song details from YouTube (NoEmbed)...</span>
+                </div>
+              )}
+
+              {fetchedMetaTrack && !isFetchingMeta && (
+                <div className="flex items-center gap-3 p-2.5 rounded-xl bg-white/5 border border-amber-400/30">
+                  <img
+                    src={fetchedMetaTrack.coverUrl}
+                    alt={fetchedMetaTrack.title}
+                    className="w-14 h-14 rounded-lg object-cover border border-white/10"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-white truncate">{fetchedMetaTrack.title}</p>
+                    <p className="text-[11px] text-amber-300/80 truncate">{fetchedMetaTrack.artist}</p>
+                    <span className="text-[10px] text-white/50 font-mono">{fetchedMetaTrack.durationFormatted}</span>
+                  </div>
+                </div>
+              )}
 
               <div className="flex flex-col gap-1">
                 <label className="text-xs text-white/80">Song Title (Hindi / Bhojpuri) *</label>

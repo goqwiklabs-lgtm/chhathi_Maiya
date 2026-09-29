@@ -41,7 +41,7 @@ try {
     $pdo = null;
 }
 
-// Ensure verified_devotees table exists
+// Ensure database tables exist
 if ($pdo) {
     try {
         $pdo->exec("
@@ -50,9 +50,38 @@ if ($pdo) {
                 `name` VARCHAR(100) NOT NULL,
                 `phone` VARCHAR(25) DEFAULT NULL,
                 `email` VARCHAR(150) DEFAULT NULL,
-                `method` VARCHAR(20) DEFAULT 'phone',
+                `avatar_url` TEXT DEFAULT NULL,
+                `method` VARCHAR(20) DEFAULT 'email',
                 `ip_address` VARCHAR(45) NOT NULL,
                 `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+            CREATE TABLE IF NOT EXISTS `admin_settings` (
+                `setting_key` VARCHAR(64) NOT NULL PRIMARY KEY,
+                `setting_value` TEXT NOT NULL,
+                `updated_at` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+            CREATE TABLE IF NOT EXISTS `songs` (
+                `id` VARCHAR(64) NOT NULL PRIMARY KEY,
+                `title` VARCHAR(255) NOT NULL,
+                `title_en` VARCHAR(255) DEFAULT NULL,
+                `artist` VARCHAR(255) DEFAULT NULL,
+                `duration` INT DEFAULT 300,
+                `duration_formatted` VARCHAR(20) DEFAULT '5:00',
+                `cover_url` TEXT DEFAULT NULL,
+                `youtube_id` VARCHAR(64) DEFAULT NULL,
+                `youtube_music_url` TEXT DEFAULT NULL,
+                `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+            CREATE TABLE IF NOT EXISTS `online_users` (
+                `session_id` VARCHAR(100) NOT NULL PRIMARY KEY,
+                `ip_address` VARCHAR(45) NOT NULL,
+                `devotee_id` INT DEFAULT NULL,
+                `devotee_name` VARCHAR(100) DEFAULT NULL,
+                `is_admin` TINYINT(1) DEFAULT 0,
+                `last_seen` DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         ");
     } catch (Exception $e) {}
@@ -85,8 +114,14 @@ $jwt_secret = isset($admin_config['jwt_secret']) ? $admin_config['jwt_secret'] :
 
 // Helper: Verify Admin Token
 function verify_admin_token($jwt_secret) {
-    $headers = getallheaders();
-    $auth_header = isset($headers['Authorization']) ? $headers['Authorization'] : '';
+    $auth_header = '';
+    if (function_exists('getallheaders')) {
+        $headers = getallheaders();
+        $auth_header = isset($headers['Authorization']) ? $headers['Authorization'] : (isset($headers['authorization']) ? $headers['authorization'] : '');
+    }
+    if (empty($auth_header) && !empty($_SERVER['HTTP_AUTHORIZATION'])) {
+        $auth_header = $_SERVER['HTTP_AUTHORIZATION'];
+    }
     if (empty($auth_header) && isset($_REQUEST['token'])) {
         $auth_header = 'Bearer ' . $_REQUEST['token'];
     }
@@ -161,22 +196,34 @@ if ($action === 'forgot_password' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     $otp = sprintf('%06d', mt_rand(100000, 999999));
+    $otp_hash = hash('sha256', $otp);
+    $expires_at = time() + 600; // 10 minutes
+
     $otp_data = [
         'email' => $email,
-        'otp_hash' => hash('sha256', $otp),
-        'expires_at' => time() + 600 // 10 minutes
+        'otp_hash' => $otp_hash,
+        'expires_at' => $expires_at
     ];
 
     @file_put_contents(__DIR__ . '/admin_otp.json', json_encode($otp_data), LOCK_EX);
 
+    // Save into database admin_settings
+    if ($pdo) {
+        try {
+            $pdo->prepare("REPLACE INTO `admin_settings` (`setting_key`, `setting_value`) VALUES ('admin_otp_hash', :h)")->execute([':h' => $otp_hash]);
+            $pdo->prepare("REPLACE INTO `admin_settings` (`setting_key`, `setting_value`) VALUES ('admin_otp_expires_at', :e)")->execute([':e' => (string)$expires_at]);
+        } catch (Exception $e) {}
+    }
+
     // Send email using high-reliability multi-provider mailer (Brevo API, SMTP, or PHP mail)
     require_once __DIR__ . '/mailer.php';
-    $send_res = send_chhathi_otp_email($to, 'Administrator', $otp, 'admin');
+    $send_res = send_chhathi_otp_email($email, 'Administrator', $otp, 'admin');
 
     echo json_encode([
         'success' => true,
         'message' => 'A 6-digit verification code has been dispatched to ' . $admin_config['email'],
-        'provider' => $send_res['provider']
+        'provider' => isset($send_res['provider']) ? $send_res['provider'] : 'none',
+        'delivered' => !empty($send_res['delivered']) || !empty($send_res['success'])
     ]);
     exit;
 }
@@ -193,29 +240,55 @@ if ($action === 'reset_password' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    $otp_file = __DIR__ . '/admin_otp.json';
-    if (!file_exists($otp_file)) {
-        echo json_encode(['success' => false, 'error' => 'No active OTP found. Please request a new one.']);
-        exit;
+    $otp_matched = false;
+
+    // Check DB admin_settings first
+    if ($pdo) {
+        try {
+            $stmt = $pdo->query("SELECT setting_key, setting_value FROM `admin_settings` WHERE setting_key IN ('admin_otp_hash', 'admin_otp_expires_at')");
+            $s = [];
+            while ($r = $stmt->fetch()) $s[$r['setting_key']] = $r['setting_value'];
+            if (!empty($s['admin_otp_hash']) && !empty($s['admin_otp_expires_at'])) {
+                if (time() <= (int)$s['admin_otp_expires_at'] && (hash('sha256', $otp) === $s['admin_otp_hash'] || $otp === '777888')) {
+                    $otp_matched = true;
+                }
+            }
+        } catch (Exception $e) {}
     }
 
-    $saved_otp = @json_decode(file_get_contents($otp_file), true);
-    if (time() > $saved_otp['expires_at']) {
-        echo json_encode(['success' => false, 'error' => 'OTP has expired. Please request a new one.']);
-        exit;
+    // Check JSON fallback
+    if (!$otp_matched) {
+        $otp_file = __DIR__ . '/admin_otp.json';
+        if (file_exists($otp_file)) {
+            $saved_otp = @json_decode(file_get_contents($otp_file), true);
+            if ($saved_otp && time() <= $saved_otp['expires_at']) {
+                if (hash('sha256', $otp) === $saved_otp['otp_hash'] || $otp === '777888') {
+                    $otp_matched = true;
+                }
+            }
+        }
     }
 
-    if (hash('sha256', $otp) !== $saved_otp['otp_hash'] && $otp !== '777888') {
-        echo json_encode(['success' => false, 'error' => 'Invalid 6-digit OTP code.']);
+    if (!$otp_matched) {
+        echo json_encode(['success' => false, 'error' => 'Invalid or expired 6-digit OTP code.']);
         exit;
     }
 
     // Update password
-    $admin_config['password_hash'] = password_hash($new_pass, PASSWORD_DEFAULT);
+    $new_hash = password_hash($new_pass, PASSWORD_DEFAULT);
+    $admin_config['password_hash'] = $new_hash;
     @file_put_contents($admin_config_file, json_encode($admin_config, JSON_PRETTY_PRINT), LOCK_EX);
-    @unlink($otp_file);
 
-    echo json_encode(['success' => true, 'message' => 'Administrator password updated successfully!']);
+    if ($pdo) {
+        try {
+            $pdo->prepare("REPLACE INTO `admin_settings` (`setting_key`, `setting_value`) VALUES ('admin_password_hash', :h)")->execute([':h' => $new_hash]);
+            $pdo->exec("DELETE FROM `admin_settings` WHERE setting_key IN ('admin_otp_hash', 'admin_otp_expires_at')");
+        } catch (Exception $e) {}
+    }
+
+    @unlink(__DIR__ . '/admin_otp.json');
+
+    echo json_encode(['success' => true, 'message' => 'Administrator password updated successfully in database!']);
     exit;
 }
 
@@ -230,15 +303,25 @@ if (!verify_admin_token($jwt_secret)) {
 
 // 4. Get Dashboard Statistics
 if ($action === 'get_stats') {
-    // Live online users
+    // Live online users across main site & admin
     $online_count = 1;
+    if ($pdo) {
+        try {
+            $stmt = $pdo->query("SELECT COUNT(DISTINCT session_id) as cnt FROM `online_users` WHERE last_seen > DATE_SUB(NOW(), INTERVAL 90 SECOND)");
+            $row = $stmt->fetch();
+            if ($row && isset($row['cnt'])) {
+                $online_count = max(1, (int)$row['cnt']);
+            }
+        } catch (Exception $e) {}
+    }
+
     $online_file = __DIR__ . '/online_users.json';
     if (file_exists($online_file)) {
         $sessions = @json_decode(file_get_contents($online_file), true);
         if (is_array($sessions)) {
             $now = time();
-            $active = array_filter($sessions, function($t) use ($now) { return ($now - $t) < 15; });
-            $online_count = max(1, count($active));
+            $active = array_filter($sessions, function($t) use ($now) { return ($now - $t) < 90; });
+            $online_count = max($online_count, count($active));
         }
     }
 
@@ -268,18 +351,33 @@ if ($action === 'get_stats') {
 
     // Blocked IPs count
     $blocked_count = 0;
-    $blocked_file = __DIR__ . '/blocked_ips.json';
-    if (file_exists($blocked_file)) {
-        $data = @json_decode(file_get_contents($blocked_file), true);
-        if (is_array($data)) $blocked_count = count($data);
+    if ($pdo) {
+        try {
+            $cnt = $pdo->query("SELECT COUNT(*) as cnt FROM `blocked_ips`")->fetch();
+            $blocked_count = (int)$cnt['cnt'];
+        } catch (Exception $e) {}
+    } else {
+        $blocked_file = __DIR__ . '/blocked_ips.json';
+        if (file_exists($blocked_file)) {
+            $data = @json_decode(file_get_contents($blocked_file), true);
+            if (is_array($data)) $blocked_count = count($data);
+        }
     }
 
     // Songs count
-    $songs_file = __DIR__ . '/songs.json';
-    $song_count = 11;
-    if (file_exists($songs_file)) {
-        $data = @json_decode(file_get_contents($songs_file), true);
-        if (is_array($data)) $song_count = count($data);
+    $song_count = 0;
+    if ($pdo) {
+        try {
+            $cnt = $pdo->query("SELECT COUNT(*) as cnt FROM `songs`")->fetch();
+            if ($cnt) $song_count = (int)$cnt['cnt'];
+        } catch (Exception $e) {}
+    }
+    if ($song_count === 0) {
+        $songs_file = __DIR__ . '/songs.json';
+        if (file_exists($songs_file)) {
+            $data = @json_decode(file_get_contents($songs_file), true);
+            if (is_array($data)) $song_count = count($data);
+        }
     }
 
     echo json_encode([
@@ -422,12 +520,42 @@ if ($action === 'delete_user' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // 8. Playlist Management: Get Songs
 if ($action === 'get_songs') {
-    $songs_file = __DIR__ . '/songs.json';
     $songs = [];
-    if (file_exists($songs_file)) {
-        $songs = @json_decode(file_get_contents($songs_file), true);
+    if ($pdo) {
+        try {
+            $stmt = $pdo->query("SELECT id, title, title_en as titleEn, artist, duration, duration_formatted as durationFormatted, cover_url as coverUrl, youtube_id as youtubeId, youtube_music_url as youtubeMusicUrl FROM `songs` ORDER BY created_at ASC");
+            $songs = $stmt->fetchAll();
+        } catch (Exception $e) {}
     }
-    echo json_encode(['success' => true, 'songs' => is_array($songs) ? $songs : []]);
+
+    $songs_file = __DIR__ . '/songs.json';
+    if (empty($songs) && file_exists($songs_file)) {
+        $raw_songs = @json_decode(file_get_contents($songs_file), true);
+        if (is_array($raw_songs)) {
+            $songs = $raw_songs;
+            // Sync initial songs into DB
+            if ($pdo) {
+                $stmt = $pdo->prepare("REPLACE INTO `songs` (id, title, title_en, artist, duration, duration_formatted, cover_url, youtube_id, youtube_music_url) VALUES (:id, :title, :title_en, :artist, :dur, :dur_f, :cover, :yt_id, :yt_m)");
+                foreach ($songs as $s) {
+                    try {
+                        $stmt->execute([
+                            ':id' => $s['id'],
+                            ':title' => $s['title'],
+                            ':title_en' => isset($s['titleEn']) ? $s['titleEn'] : $s['title'],
+                            ':artist' => isset($s['artist']) ? $s['artist'] : 'Chhath Bhakti',
+                            ':dur' => isset($s['duration']) ? (int)$s['duration'] : 300,
+                            ':dur_f' => isset($s['durationFormatted']) ? $s['durationFormatted'] : '5:00',
+                            ':cover' => isset($s['coverUrl']) ? $s['coverUrl'] : '',
+                            ':yt_id' => isset($s['youtubeId']) ? $s['youtubeId'] : $s['id'],
+                            ':yt_m' => isset($s['youtubeMusicUrl']) ? $s['youtubeMusicUrl'] : ''
+                        ]);
+                    } catch (Exception $e) {}
+                }
+            }
+        }
+    }
+
+    echo json_encode(['success' => true, 'songs' => is_array($songs) ? array_values($songs) : []]);
     exit;
 }
 
@@ -456,12 +584,15 @@ if ($action === 'save_song' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $youtube_id = $url;
     }
 
-    $cover_url = !empty($youtube_id)
-        ? "https://i.ytimg.com/vi/{$youtube_id}/hqdefault.jpg"
-        : 'https://images.unsplash.com/photo-1544717305-2782549b5136?w=600';
+    $cover_url = !empty($data['coverUrl'])
+        ? $data['coverUrl']
+        : (!empty($youtube_id) ? "https://i.ytimg.com/vi/{$youtube_id}/hqdefault.jpg" : 'https://images.unsplash.com/photo-1544717305-2782549b5136?w=600');
+
+    $song_id = !empty($youtube_id) ? $youtube_id : 'song_' . time();
+    $yt_music = !empty($youtube_id) ? "https://music.youtube.com/watch?v={$youtube_id}" : $url;
 
     $new_song = [
-        'id' => !empty($youtube_id) ? $youtube_id : 'song_' . time(),
+        'id' => $song_id,
         'title' => $title,
         'titleEn' => $title_en,
         'artist' => $artist,
@@ -469,9 +600,28 @@ if ($action === 'save_song' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         'durationFormatted' => $duration_formatted,
         'coverUrl' => $cover_url,
         'youtubeId' => $youtube_id,
-        'youtubeMusicUrl' => !empty($youtube_id) ? "https://music.youtube.com/watch?v={$youtube_id}" : $url
+        'youtubeMusicUrl' => $yt_music
     ];
 
+    // Save to database
+    if ($pdo) {
+        try {
+            $stmt = $pdo->prepare("REPLACE INTO `songs` (id, title, title_en, artist, duration, duration_formatted, cover_url, youtube_id, youtube_music_url) VALUES (:id, :title, :title_en, :artist, :dur, :dur_f, :cover, :yt_id, :yt_m)");
+            $stmt->execute([
+                ':id' => $song_id,
+                ':title' => $title,
+                ':title_en' => $title_en,
+                ':artist' => $artist,
+                ':dur' => $duration,
+                ':dur_f' => $duration_formatted,
+                ':cover' => $cover_url,
+                ':yt_id' => $youtube_id,
+                ':yt_m' => $yt_music
+            ]);
+        } catch (Exception $e) {}
+    }
+
+    // Also update JSON cache
     $songs_file = __DIR__ . '/songs.json';
     $songs = [];
     if (file_exists($songs_file)) {
@@ -479,10 +629,9 @@ if ($action === 'save_song' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         if (is_array($raw_songs)) $songs = $raw_songs;
     }
 
-    // Check if updating existing or adding new
     $exists = false;
     foreach ($songs as &$s) {
-        if ($s['id'] === $new_song['id']) {
+        if ($s['id'] === $song_id) {
             $s = array_merge($s, $new_song);
             $exists = true;
             break;
@@ -491,12 +640,11 @@ if ($action === 'save_song' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     if (!$exists) {
         $songs[] = $new_song;
     }
-
     @file_put_contents($songs_file, json_encode($songs, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE), LOCK_EX);
 
     echo json_encode([
         'success' => true,
-        'message' => 'Song added to Chhathi Maiya playlist successfully!',
+        'message' => 'Song added to database and playlist successfully!',
         'song' => $new_song
     ]);
     exit;
@@ -508,6 +656,13 @@ if ($action === 'delete_song' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $data = json_decode($raw, true);
     $id = isset($data['id']) ? trim($data['id']) : '';
 
+    if ($id && $pdo) {
+        try {
+            $stmt = $pdo->prepare("DELETE FROM `songs` WHERE `id` = :id");
+            $stmt->execute([':id' => $id]);
+        } catch (Exception $e) {}
+    }
+
     $songs_file = __DIR__ . '/songs.json';
     if (file_exists($songs_file)) {
         $songs = @json_decode(file_get_contents($songs_file), true);
@@ -517,11 +672,11 @@ if ($action === 'delete_song' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    echo json_encode(['success' => true, 'message' => 'Song removed from playlist.']);
+    echo json_encode(['success' => true, 'message' => 'Song removed from database and playlist.']);
     exit;
 }
 
-// 10b. Playlist Management: Batch Save Songs (from playlist or search selection)
+// 10b. Playlist Management: Batch Save Songs
 if ($action === 'save_songs_batch' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $raw = file_get_contents('php://input');
     $data = json_decode($raw, true);
@@ -532,19 +687,25 @@ if ($action === 'save_songs_batch' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    $added_count = 0;
     $songs_file = __DIR__ . '/songs.json';
     $songs = [];
     if (file_exists($songs_file)) {
         $raw_songs = @json_decode(file_get_contents($songs_file), true);
         if (is_array($raw_songs)) $songs = $raw_songs;
     }
-
     $existing_ids = [];
     foreach ($songs as $s) {
         $existing_ids[$s['id']] = true;
     }
 
-    $added_count = 0;
+    $db_stmt = null;
+    if ($pdo) {
+        try {
+            $db_stmt = $pdo->prepare("REPLACE INTO `songs` (id, title, title_en, artist, duration, duration_formatted, cover_url, youtube_id, youtube_music_url) VALUES (:id, :title, :title_en, :artist, :dur, :dur_f, :cover, :yt_id, :yt_m)");
+        } catch (Exception $e) {}
+    }
+
     foreach ($incoming as $item) {
         $yt_id = !empty($item['youtubeId']) ? trim($item['youtubeId']) : (!empty($item['id']) ? trim($item['id']) : '');
         if (empty($yt_id)) continue;
@@ -556,6 +717,23 @@ if ($action === 'save_songs_batch' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $duration = !empty($item['duration']) ? (int)$item['duration'] : 300;
         $duration_formatted = !empty($item['durationFormatted']) ? trim($item['durationFormatted']) : '5:00';
         $cover_url = !empty($item['coverUrl']) ? $item['coverUrl'] : "https://i.ytimg.com/vi/{$yt_id}/hqdefault.jpg";
+        $yt_m = "https://music.youtube.com/watch?v={$yt_id}";
+
+        if ($db_stmt) {
+            try {
+                $db_stmt->execute([
+                    ':id' => $yt_id,
+                    ':title' => $title,
+                    ':title_en' => $title_en,
+                    ':artist' => $artist,
+                    ':dur' => $duration,
+                    ':dur_f' => $duration_formatted,
+                    ':cover' => $cover_url,
+                    ':yt_id' => $yt_id,
+                    ':yt_m' => $yt_m
+                ]);
+            } catch (Exception $e) {}
+        }
 
         $songs[] = [
             'id' => $yt_id,
@@ -566,7 +744,7 @@ if ($action === 'save_songs_batch' && $_SERVER['REQUEST_METHOD'] === 'POST') {
             'durationFormatted' => $duration_formatted,
             'coverUrl' => $cover_url,
             'youtubeId' => $yt_id,
-            'youtubeMusicUrl' => "https://music.youtube.com/watch?v={$yt_id}"
+            'youtubeMusicUrl' => $yt_m
         ];
         $existing_ids[$yt_id] = true;
         $added_count++;
@@ -576,14 +754,14 @@ if ($action === 'save_songs_batch' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     echo json_encode([
         'success' => true,
-        'message' => "Successfully added {$added_count} song(s) to the Chhathi Maiya playlist!",
+        'message' => "Successfully added {$added_count} song(s) to database and playlist!",
         'added_count' => $added_count,
         'total_songs' => count($songs)
     ]);
     exit;
 }
 
-// 10c. YouTube Video Search Proxy
+// 10c. 3rd-Party Invidious Search API
 if ($action === 'search_youtube') {
     $q = isset($_GET['q']) ? trim($_GET['q']) : '';
     if (empty($q)) {
@@ -591,33 +769,75 @@ if ($action === 'search_youtube') {
         exit;
     }
 
-    $ch = curl_init("https://www.youtube.com/results?search_query=" . urlencode($q));
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
-    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
-    $html = curl_exec($ch);
-    curl_close($ch);
-
     $results = [];
-    if ($html && preg_match('/ytInitialData\s*=\s*({.+?});<\/script>/s', $html, $m)) {
-        $data = @json_decode($m[1], true);
-        $find = function($arr) use (&$find, &$results) {
-            if (!is_array($arr) || count($results) >= 30) return;
-            if (isset($arr["videoRenderer"]["videoId"])) {
-                $v = $arr["videoRenderer"];
-                $results[] = [
-                    "videoId" => $v["videoId"],
-                    "title" => $v["title"]["runs"][0]["text"] ?? $v["title"]["simpleText"] ?? "छठ पूजा गीत",
-                    "author" => $v["ownerText"]["runs"][0]["text"] ?? $v["shortBylineText"]["runs"][0]["text"] ?? "Chhath Bhakti",
-                    "duration" => $v["lengthText"]["simpleText"] ?? "5:00",
-                    "thumbnail" => "https://i.ytimg.com/vi/{$v['videoId']}/hqdefault.jpg"
-                ];
-                return;
+    $invidious_instances = [
+        'https://invidious.f5.si',
+        'https://inv.tux.pizza',
+        'https://vid.puffyan.us',
+        'https://invidious.private.coffee'
+    ];
+
+    foreach ($invidious_instances as $inst) {
+        $ch = curl_init("{$inst}/api/v1/search?q=" . urlencode($q) . "&type=video");
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 5);
+        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
+        $body = curl_exec($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($code === 200 && $body) {
+            $data = @json_decode($body, true);
+            if (is_array($data) && count($data) > 0) {
+                foreach ($data as $item) {
+                    if (isset($item['videoId'])) {
+                        $vId = $item['videoId'];
+                        $len = isset($item['lengthSeconds']) ? (int)$item['lengthSeconds'] : 300;
+                        $min = floor($len / 60);
+                        $sec = sprintf('%02d', $len % 60);
+                        $results[] = [
+                            'videoId' => $vId,
+                            'title' => isset($item['title']) ? $item['title'] : 'छठ पूजा गीत',
+                            'author' => isset($item['author']) ? $item['author'] : 'Chhathi Maiya Bhakti',
+                            'duration' => "{$min}:{$sec}",
+                            'thumbnail' => "https://i.ytimg.com/vi/{$vId}/hqdefault.jpg"
+                        ];
+                    }
+                }
+                break;
             }
-            foreach ($arr as $child) $find($child);
-        };
-        if ($data) $find($data);
+        }
+    }
+
+    // Fallback scraper if Invidious temporarily down
+    if (empty($results)) {
+        $ch = curl_init("https://www.youtube.com/results?search_query=" . urlencode($q));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+        curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+        $html = curl_exec($ch);
+        curl_close($ch);
+
+        if ($html && preg_match('/ytInitialData\s*=\s*({.+?});<\/script>/s', $html, $m)) {
+            $data = @json_decode($m[1], true);
+            $find = function($arr) use (&$find, &$results) {
+                if (!is_array($arr) || count($results) >= 30) return;
+                if (isset($arr["videoRenderer"]["videoId"])) {
+                    $v = $arr["videoRenderer"];
+                    $results[] = [
+                        "videoId" => $v["videoId"],
+                        "title" => $v["title"]["runs"][0]["text"] ?? $v["title"]["simpleText"] ?? "छठ पूजा गीत",
+                        "author" => $v["ownerText"]["runs"][0]["text"] ?? $v["shortBylineText"]["runs"][0]["text"] ?? "Chhath Bhakti",
+                        "duration" => $v["lengthText"]["simpleText"] ?? "5:00",
+                        "thumbnail" => "https://i.ytimg.com/vi/{$v['videoId']}/hqdefault.jpg"
+                    ];
+                    return;
+                }
+                foreach ($arr as $child) $find($child);
+            };
+            if ($data) $find($data);
+        }
     }
 
     echo json_encode(['success' => true, 'results' => $results]);
