@@ -70,6 +70,24 @@ function ensure_tables_exist($pdo) {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         ");
     } catch (Exception $e3) {}
+
+    try {
+        $pdo->exec("
+            CREATE TABLE IF NOT EXISTS `verified_devotees` (
+                `id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+                `name` VARCHAR(100) NOT NULL,
+                `phone` VARCHAR(20) DEFAULT '',
+                `email` VARCHAR(150) DEFAULT '',
+                `method` VARCHAR(30) DEFAULT 'email',
+                `ip_address` VARCHAR(50) DEFAULT '',
+                `created_at` DATETIME DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+        ");
+    } catch (Exception $e4) {}
+
+    try {
+        $pdo->exec("ALTER TABLE `verified_devotees` ADD COLUMN `phone` VARCHAR(20) DEFAULT '' AFTER `name`");
+    } catch (Exception $e5) {}
 }
 
 if ($pdo) {
@@ -329,6 +347,11 @@ function validate_phone($phone) {
     return true;
 }
 
+function validate_indian_mobile($phone) {
+    return validate_phone($phone);
+}
+
+
 // Content Moderation Filter: Adult/Porn, Profanity/Abuse (EN/HI), Hate Speech & Religious Insults
 function check_inappropriate_content($text) {
     if (empty($text)) return false;
@@ -381,7 +404,17 @@ function check_inappropriate_content($text) {
 // Check IP status
 $is_blocked = is_ip_blocked($pdo, $client_ip);
 
-$action = isset($_GET['action']) ? $_GET['action'] : (isset($_POST['action']) ? $_POST['action'] : 'get_messages');
+// Handle JSON input body or POST parameters
+$raw_input_stream = @file_get_contents('php://input');
+$json_post_data = [];
+if (!empty($raw_input_stream)) {
+    $parsed_json = @json_decode($raw_input_stream, true);
+    if (is_array($parsed_json)) {
+        $json_post_data = $parsed_json;
+    }
+}
+
+$action = isset($_GET['action']) ? $_GET['action'] : (isset($_POST['action']) ? $_POST['action'] : (isset($json_post_data['action']) ? $json_post_data['action'] : 'get_messages'));
 
 // Diagnostic test endpoint
 if ($action === 'test') {
@@ -400,6 +433,7 @@ if ($action === 'test') {
 
     echo json_encode([
         'success' => true,
+        'mysql_online' => ($pdo !== null),
         'status' => $pdo ? 'MySQL Connected & Ready' : 'Operating in High-Speed Cache Mode',
         'database' => $db_name,
         'host' => $db_host,
@@ -410,6 +444,28 @@ if ($action === 'test') {
         'is_blocked' => $is_blocked,
         'timestamp' => date('Y-m-d H:i:s')
     ]);
+    exit;
+}
+
+// Record live typing status (Instagram / Discord / WhatsApp style)
+if ($action === 'typing' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+    $typing_name = isset($json_post_data['name']) ? trim($json_post_data['name']) : (isset($_POST['name']) ? trim($_POST['name']) : '');
+    if (!empty($typing_name) && mb_strlen($typing_name) <= 50) {
+        $clean_name = htmlspecialchars(strip_tags($typing_name), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $typing_file = __DIR__ . '/typing_status.json';
+        $typing_data = [];
+        if (file_exists($typing_file)) {
+            $raw_t = @json_decode(file_get_contents($typing_file), true);
+            if (is_array($raw_t)) $typing_data = $raw_t;
+        }
+        $key = substr(md5($client_ip . '_' . $clean_name), 0, 16);
+        $typing_data[$key] = [
+            'name' => $clean_name,
+            'expires_at' => time() + 4
+        ];
+        @file_put_contents($typing_file, json_encode($typing_data), LOCK_EX);
+    }
+    echo json_encode(['success' => true]);
     exit;
 }
 
@@ -489,49 +545,40 @@ if ($is_admin) {
     }
 }
 
-// Fetch messages with high-concurrency disk cache
+// Fetch messages with realtime sync across devices & active typing indicators
 if ($action === 'get_messages') {
-    $after_id = isset($_GET['after_id']) ? (int)$_GET['after_id'] : 0;
+    $raw_after_id = isset($_GET['after_id']) ? (int)$_GET['after_id'] : (isset($json_post_data['after_id']) ? (int)$json_post_data['after_id'] : 0);
+    // Guard against timestamp-based tempIds from frontend (e.g. 174...); only real auto-increment IDs allowed
+    $after_id = ($raw_after_id > 0 && $raw_after_id < 100000000) ? $raw_after_id : 0;
     $limit = isset($_GET['limit']) ? min(100, max(1, (int)$_GET['limit'])) : 60;
     $cache_file = __DIR__ . '/messages_cache.json';
 
-    // Fast-path: Check high-speed disk cache first (avoids MySQL connection exhaustion)
-    if (file_exists($cache_file)) {
-        $cache_time = filemtime($cache_file);
-        // Serve from fast cache if cache is less than 3 seconds old or on heavy load
-        if ((time() - $cache_time) < 3 || $after_id > 0) {
-            $raw = @file_get_contents($cache_file);
-            if ($raw) {
-                $cached_messages = @json_decode($raw, true);
-                if (is_array($cached_messages)) {
-                    if ($after_id > 0) {
-                        $new_slice = array_values(array_filter($cached_messages, function($m) use ($after_id) {
-                            return (int)$m['id'] > $after_id;
-                        }));
-                        echo json_encode([
-                            'success' => true,
-                            'is_blocked' => $is_blocked,
-                            'messages' => $new_slice,
-                            'cached' => true
-                        ]);
-                        exit;
-                    } else {
-                        echo json_encode([
-                            'success' => true,
-                            'is_blocked' => $is_blocked,
-                            'messages' => $cached_messages,
-                            'cached' => true
-                        ]);
-                        exit;
-                    }
+    // Collect active typing users (last 4 seconds)
+    $typing_file = __DIR__ . '/typing_status.json';
+    $active_typing = [];
+    if (file_exists($typing_file)) {
+        $raw_t = @json_decode(file_get_contents($typing_file), true);
+        if (is_array($raw_t)) {
+            $now = time();
+            $changed = false;
+            foreach ($raw_t as $k => $item) {
+                if (isset($item['expires_at']) && $item['expires_at'] > $now) {
+                    $active_typing[] = $item['name'];
+                } else {
+                    unset($raw_t[$k]);
+                    $changed = true;
                 }
+            }
+            if ($changed) {
+                @file_put_contents($typing_file, json_encode($raw_t), LOCK_EX);
             }
         }
     }
 
-    // Database query fallback
     $messages = [];
-    if ($pdo) {
+    $is_mysql_live = ($pdo !== null);
+
+    if ($is_mysql_live) {
         try {
             if ($after_id > 0) {
                 $stmt = $pdo->prepare("SELECT id, name, message, DATE_FORMAT(created_at, '%h:%i %p') as time_formatted, UNIX_TIMESTAMP(created_at) as timestamp FROM `chat_messages` WHERE id > :after_id ORDER BY id ASC LIMIT :limit");
@@ -544,35 +591,49 @@ if ($action === 'get_messages') {
                 $stmt->bindValue(':limit', $limit, PDO::PARAM_INT);
                 $stmt->execute();
                 $messages = $stmt->fetchAll();
+                // Cache latest snapshot
                 @file_put_contents($cache_file, json_encode($messages), LOCK_EX);
             }
-        } catch (Exception $e) {}
+        } catch (Exception $e) {
+            $is_mysql_live = false;
+        }
     }
 
+    // Disk cache fallback if MySQL query returned empty or DB is offline
     if (empty($messages) && file_exists($cache_file)) {
         $raw = @file_get_contents($cache_file);
-        if ($raw) $messages = @json_decode($raw, true) ?: [];
+        if ($raw) {
+            $cached_messages = @json_decode($raw, true) ?: [];
+            if ($after_id > 0) {
+                $messages = array_values(array_filter($cached_messages, function($m) use ($after_id) {
+                    return (int)$m['id'] > $after_id;
+                }));
+            } else {
+                $messages = $cached_messages;
+            }
+        }
     }
 
     echo json_encode([
         'success' => true,
+        'mysql_online' => $is_mysql_live,
         'is_blocked' => $is_blocked,
-        'messages' => is_array($messages) ? $messages : []
+        'messages' => is_array($messages) ? array_values($messages) : [],
+        'typing' => array_values(array_unique($active_typing))
     ]);
     exit;
 }
 
-// Send 6-Digit Email OTP to Devotee
+// Send 6-Digit Email OTP to Devotee (Requires Name, Email, and Phone)
 if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($is_blocked) {
         echo json_encode(['success' => false, 'blocked' => true, 'error' => 'Your IP is permanently blocked.']);
         exit;
     }
 
-    $raw = file_get_contents('php://input');
-    $data = json_decode($raw, true);
-    $email = isset($data['email']) ? trim(strtolower($data['email'])) : (isset($_POST['email']) ? trim(strtolower($_POST['email'])) : '');
-    $name = isset($data['name']) ? trim($data['name']) : (isset($_POST['name']) ? trim($_POST['name']) : '');
+    $email = isset($json_post_data['email']) ? trim(strtolower($json_post_data['email'])) : (isset($_POST['email']) ? trim(strtolower($_POST['email'])) : '');
+    $name = isset($json_post_data['name']) ? trim($json_post_data['name']) : (isset($_POST['name']) ? trim($_POST['name']) : '');
+    $phone = isset($json_post_data['phone']) ? trim($json_post_data['phone']) : (isset($_POST['phone']) ? trim($_POST['phone']) : '');
 
     $name_check = validate_real_name($name);
     if ($name_check !== true) {
@@ -586,6 +647,12 @@ if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
+    $phone_check = validate_indian_mobile($phone);
+    if ($phone_check !== true) {
+        echo json_encode(['success' => false, 'error' => $phone_check]);
+        exit;
+    }
+
     $otp = sprintf('%06d', mt_rand(100000, 999999));
     $otps_file = __DIR__ . '/email_otps.json';
     $otps = [];
@@ -596,6 +663,7 @@ if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $otps[$email] = [
         'name' => $name,
+        'phone' => $phone,
         'otp' => $otp,
         'otp_hash' => hash('sha256', $otp),
         'expires_at' => time() + 600, // 10 minutes
@@ -606,11 +674,12 @@ if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     // Send email using high-reliability multi-provider mailer (Brevo API, SMTP, or PHP mail)
     $provider = 'php_mail';
     $delivered = false;
+    $send_res = [];
     if (file_exists(__DIR__ . '/mailer.php')) {
         require_once __DIR__ . '/mailer.php';
         $send_res = send_chhathi_otp_email($email, $name, $otp, 'devotee');
         $provider = isset($send_res['provider']) ? $send_res['provider'] : 'custom';
-        $delivered = !empty($send_res['delivered']);
+        $delivered = (!empty($send_res['success']) || !empty($send_res['delivered']));
     } else {
         $from_domain = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'chhathimaiya.is-best.net';
         $from_email = "no-reply@" . preg_replace('/^www\./', '', $from_domain);
@@ -632,25 +701,25 @@ if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     } else {
         $error_detail = "Failed to dispatch email verification code.";
         if (isset($send_res['errors']['brevo_api']) && strpos($send_res['errors']['brevo_api'], 'unrecognised IP address') !== false) {
-            $error_detail = "Brevo blocked email delivery: Server IP (13.71.3.99) is not whitelisted. Please turn OFF 'Authorised IP addresses' in Brevo Settings (https://app.brevo.com/security/authorised_ips) or click 'Authorize IP' in the email sent to go.qwiklabs@gmail.com.";
+            $error_detail = "Brevo blocked email delivery: Server IP is not whitelisted. Please authorize IP in Brevo settings.";
         } elseif (isset($send_res['errors']['smtp_auth']) && strpos($send_res['errors']['smtp_auth'], 'Unauthorized IP') !== false) {
-            $error_detail = "Brevo SMTP blocked email: Server IP is unauthorized. Please disable IP restrictions in your Brevo security settings (https://app.brevo.com/security/authorised_ips).";
+            $error_detail = "Brevo SMTP blocked email: Server IP is unauthorized. Please disable IP restrictions in Brevo settings.";
         }
         echo json_encode([
             'success' => false,
-            'error' => $error_detail
+            'error' => $error_detail,
+            'details' => isset($send_res['errors']) ? $send_res['errors'] : []
         ]);
         exit;
     }
 }
 
-// Verify 6-Digit Email OTP
+// Verify 6-Digit Email OTP and save Name, Phone, Email into Database
 if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $raw = file_get_contents('php://input');
-    $data = json_decode($raw, true);
-    $email = isset($data['email']) ? trim(strtolower($data['email'])) : (isset($_POST['email']) ? trim(strtolower($_POST['email'])) : '');
-    $otp = isset($data['otp']) ? trim($data['otp']) : (isset($_POST['otp']) ? trim($_POST['otp']) : '');
-    $name = isset($data['name']) ? trim($data['name']) : (isset($_POST['name']) ? trim($_POST['name']) : '');
+    $email = isset($json_post_data['email']) ? trim(strtolower($json_post_data['email'])) : (isset($_POST['email']) ? trim(strtolower($_POST['email'])) : '');
+    $otp = isset($json_post_data['otp']) ? trim($json_post_data['otp']) : (isset($_POST['otp']) ? trim($_POST['otp']) : '');
+    $name = isset($json_post_data['name']) ? trim($json_post_data['name']) : (isset($_POST['name']) ? trim($_POST['name']) : '');
+    $phone = isset($json_post_data['phone']) ? trim($json_post_data['phone']) : (isset($_POST['phone']) ? trim($_POST['phone']) : '');
 
     $otps_file = __DIR__ . '/email_otps.json';
     if (!file_exists($otps_file)) {
@@ -677,20 +746,27 @@ if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // OTP Match! Clean up
+    // OTP matched! Extract saved details
+    $final_name = !empty($name) ? $name : (isset($entry['name']) ? $entry['name'] : 'Devotee');
+    $final_phone = !empty($phone) ? $phone : (isset($entry['phone']) ? $entry['phone'] : '');
+
     unset($otps[$email]);
     @file_put_contents($otps_file, json_encode($otps), LOCK_EX);
 
-    $final_name = !empty($name) ? $name : $entry['name'];
-
-    // Record verified devotee for Admin Panel
+    // Save Name, Phone, Email into MySQL database
     if ($pdo) {
         try {
-            $stmt = $pdo->prepare("INSERT INTO `verified_devotees` (`name`, `email`, `method`, `ip_address`) VALUES (:name, :email, 'email', :ip)");
-            $stmt->execute([':name' => $final_name, ':email' => $email, ':ip' => $client_ip]);
+            $stmt = $pdo->prepare("INSERT INTO `verified_devotees` (`name`, `phone`, `email`, `method`, `ip_address`) VALUES (:name, :phone, :email, 'email', :ip)");
+            $stmt->execute([
+                ':name' => $final_name,
+                ':phone' => $final_phone,
+                ':email' => $email,
+                ':ip' => $client_ip
+            ]);
         } catch (Exception $e) {}
     }
 
+    // Save into JSON fallback cache
     $dev_file = __DIR__ . '/verified_devotees.json';
     $dev_list = [];
     if (file_exists($dev_file)) {
@@ -700,7 +776,7 @@ if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $dev_list[] = [
         'id' => time(),
         'name' => $final_name,
-        'phone' => '',
+        'phone' => $final_phone,
         'email' => $email,
         'method' => 'email',
         'ip_address' => $client_ip,
@@ -714,7 +790,10 @@ if ($action === 'verify_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         'success' => true,
         'verified' => true,
         'name' => $final_name,
+        'phone' => $final_phone,
+        'email' => $email,
         'token' => $token,
+        'mysql_online' => ($pdo !== null),
         'message' => 'Email verified successfully! Welcome to Chhathi Maiya Public Chat.'
     ]);
     exit;
@@ -933,9 +1012,9 @@ if ($action === 'send_message' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
     echo json_encode([
         'success' => true,
+        'mysql_online' => ($pdo !== null),
         'message' => $new_msg
     ]);
-    exit;
     exit;
 }
 

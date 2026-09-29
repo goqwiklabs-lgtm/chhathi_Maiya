@@ -245,7 +245,9 @@ function send_chhathi_otp_email($to_email, $to_name, $otp, $type = 'devotee') {
 
     return [
         'success' => $delivered,
+        'delivered' => $delivered,
         'provider' => $provider,
         'errors' => $error_log
     ];
 }
+

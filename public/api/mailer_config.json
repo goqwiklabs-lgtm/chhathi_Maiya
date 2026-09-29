@@ -1,9 +1,9 @@
 {
-  "brevo_api_key": "YOUR_BREVO_API_KEY",
+  "brevo_api_key": "YOUR_BREVO_API_KEY_HERE",
   "smtp_host": "smtp-relay.brevo.com",
   "smtp_port": 587,
   "smtp_user": "bba0e3001@smtp-brevo.com",
-  "smtp_pass": "YOUR_BREVO_SMTP_KEY",
+  "smtp_pass": "YOUR_BREVO_SMTP_KEY_HERE",
   "sender_email": "go.qwiklabs@gmail.com",
   "sender_name": "Chhathi Maiya Puja"
 }
