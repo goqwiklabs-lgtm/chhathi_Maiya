@@ -57,8 +57,6 @@ export const PublicChat: React.FC = () => {
   // Email OTP states
   const [otpStep, setOtpStep] = useState<'input' | 'otp_sent'>('input');
   const [otpCode, setOtpCode] = useState('');
-  const [directOtpCode, setDirectOtpCode] = useState<string | null>(null);
-  const [isFetchingDirectCode, setIsFetchingDirectCode] = useState<boolean>(false);
   const [resendCountdown, setResendCountdown] = useState<number>(0);
   const [isVerifyingOtp, setIsVerifyingOtp] = useState<boolean>(false);
 
@@ -195,11 +193,8 @@ export const PublicChat: React.FC = () => {
       if (data && data.success) {
         setOtpStep('otp_sent');
         setResendCountdown(45);
+        setOtpCode('');
         setOnboardingError(null);
-        if (data.otp_code) {
-          setDirectOtpCode(data.otp_code);
-          setOtpCode(data.otp_code);
-        }
       } else if (data && data.error) {
         setOnboardingError(data.error);
       } else {
@@ -211,37 +206,6 @@ export const PublicChat: React.FC = () => {
       setOnboardingError(err?.message ? `Connection error: ${err.message}` : 'Connection error sending email code.');
     } finally {
       setIsOnboardingSubmitting(false);
-    }
-  };
-
-  // Instant code retrieval fallback (if Brevo IP whitelist or email delivery is delayed)
-  const handleFetchDirectOtp = async () => {
-    if (!emailInput.trim() || isFetchingDirectCode) return;
-    setIsFetchingDirectCode(true);
-    setOnboardingError(null);
-    try {
-      const bodyParams = new URLSearchParams();
-      bodyParams.append('email', emailInput.trim());
-      const res = await fetch('./api/messages.php?action=get_email_otp', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Accept': 'application/json'
-        },
-        body: bodyParams.toString()
-      });
-      const data = await res.json();
-      if (data.success && data.otp_code) {
-        setDirectOtpCode(data.otp_code);
-        setOtpCode(data.otp_code);
-      } else {
-        setOnboardingError(data.error || 'No active code found. Click Resend to generate a new code.');
-      }
-    } catch {
-      setOnboardingError('Unable to retrieve verification code right now.');
-    } finally {
-      setIsFetchingDirectCode(false);
     }
   };
 
@@ -659,25 +623,8 @@ export const PublicChat: React.FC = () => {
 
                 <p className="text-[11px] text-white/70">
                   Verification code dispatched to <strong className="text-white">{emailInput.trim()}</strong>.<br/>
-                  Please enter the 6-digit code received in your inbox or spam folder:
+                  Please check your inbox or spam folder and enter the 6-digit code below:
                 </p>
-
-                {directOtpCode && (
-                  <div className="p-3 rounded-2xl bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs flex flex-col gap-1.5 shadow-lg">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-amber-300 flex items-center gap-1.5">
-                        <KeyRound className="w-4 h-4 text-amber-400" />
-                        <span>Verification Code:</span>
-                      </span>
-                      <span className="font-mono text-base font-black tracking-widest text-amber-300 bg-black/60 px-2.5 py-0.5 rounded-lg border border-amber-400/40">
-                        {directOtpCode}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-white/80">
-                      Code auto-filled below! Click <strong>Verify Code & Join Chat</strong> to enter.
-                    </p>
-                  </div>
-                )}
 
                 <div className="flex flex-col gap-1">
                   <input
@@ -704,14 +651,7 @@ export const PublicChat: React.FC = () => {
                 )}
 
                 <div className="flex items-center justify-between text-[11px] text-white/60 px-0.5">
-                  <button
-                    type="button"
-                    onClick={handleFetchDirectOtp}
-                    disabled={isFetchingDirectCode}
-                    className="text-amber-300 hover:text-amber-200 underline font-medium cursor-pointer"
-                  >
-                    {isFetchingDirectCode ? 'Checking code...' : "Didn't receive email? View Code"}
-                  </button>
+                  <span>Didn't receive code?</span>
                   {resendCountdown > 0 ? (
                     <span className="font-mono text-amber-300/80">Resend in {resendCountdown}s</span>
                   ) : (

@@ -622,46 +622,26 @@ if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $delivered = @mail($email, $subject, $body, $headers, "-f {$from_email}");
     }
 
-    $response = [
-        'success' => true,
-        'delivered' => $delivered,
-        'provider' => $provider
-    ];
-
     if ($delivered) {
-        $response['message'] = "Verification code sent to {$email}. Please check your inbox or spam folder.";
+        echo json_encode([
+            'success' => true,
+            'message' => "Verification code sent to {$email}. Please check your inbox or spam folder.",
+            'provider' => $provider
+        ]);
+        exit;
     } else {
-        // Brevo IP authorization or mailer delivery pending: provide code so user is never stuck
-        $response['brevo_ip_locked'] = true;
-        $response['otp_code'] = $otp;
-        $response['message'] = "Verification code generated! (Brevo IP whitelist pending: code provided below for instant login)";
-    }
-
-    echo json_encode($response);
-    exit;
-}
-
-// Instant Dev/Test OTP Retrieval for Devotee
-if ($action === 'get_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-    $raw = file_get_contents('php://input');
-    $data = json_decode($raw, true);
-    $email = isset($data['email']) ? trim(strtolower($data['email'])) : (isset($_POST['email']) ? trim(strtolower($_POST['email'])) : '');
-
-    $otps_file = __DIR__ . '/email_otps.json';
-    if (file_exists($otps_file)) {
-        $otps = @json_decode(file_get_contents($otps_file), true);
-        if (isset($otps[$email]) && time() <= $otps[$email]['expires_at']) {
-            echo json_encode([
-                'success' => true,
-                'otp_code' => isset($otps[$email]['otp']) ? $otps[$email]['otp'] : '',
-                'expires_in' => $otps[$email]['expires_at'] - time()
-            ]);
-            exit;
+        $error_detail = "Failed to dispatch email verification code.";
+        if (isset($send_res['errors']['brevo_api']) && strpos($send_res['errors']['brevo_api'], 'unrecognised IP address') !== false) {
+            $error_detail = "Brevo blocked email delivery: Server IP (13.71.3.99) is not whitelisted. Please turn OFF 'Authorised IP addresses' in Brevo Settings (https://app.brevo.com/security/authorised_ips) or click 'Authorize IP' in the email sent to go.qwiklabs@gmail.com.";
+        } elseif (isset($send_res['errors']['smtp_auth']) && strpos($send_res['errors']['smtp_auth'], 'Unauthorized IP') !== false) {
+            $error_detail = "Brevo SMTP blocked email: Server IP is unauthorized. Please disable IP restrictions in your Brevo security settings (https://app.brevo.com/security/authorised_ips).";
         }
+        echo json_encode([
+            'success' => false,
+            'error' => $error_detail
+        ]);
+        exit;
     }
-
-    echo json_encode(['success' => false, 'error' => 'No active OTP found. Please request a new code.']);
-    exit;
 }
 
 // Verify 6-Digit Email OTP
