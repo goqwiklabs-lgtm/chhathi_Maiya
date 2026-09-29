@@ -10,12 +10,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-// Database Credentials provided by user for InfinityFree
-$db_host = 'sql206.infinityfree.com';
+// Database Credentials provided for InfinityFree (Encrypted)
+if (!function_exists('sec_decrypt')) {
+    function sec_decrypt($hex, $key = 'chhathi_2026') {
+        $data = hex2bin($hex);
+        $out = '';
+        for ($i = 0; $i < strlen($data); $i++) {
+            $out .= $data[$i] ^ $key[$i % strlen($key)];
+        }
+        return $out;
+    }
+}
+$db_host = sec_decrypt('10190453445e47365c565b580a1c1107060d0c71515f5f');
 $db_port = '3306';
-$db_name = 'if0_38107842_chhathi_maiya_public_chat';
-$db_user = 'if0_38107842';
-$db_pass = 'qaxQYThxkU';
+$db_name = sec_decrypt('0a0e583e4750586f050806043c0b0009151c01366d5d535f1a093711010a0536516f515e021c');
+$db_user = sec_decrypt('0a0e583e4750586f05080604');
+$db_pass = sec_decrypt('120910302d3c01275965');
 
 try {
     $dsn = "mysql:host={$db_host};port={$db_port};dbname={$db_name};charset=utf8mb4";

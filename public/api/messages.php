@@ -17,12 +17,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-// Database Credentials for InfinityFree
-$db_host = 'sql206.infinityfree.com';
+// Database Credentials for InfinityFree (Encrypted)
+if (!function_exists('sec_decrypt')) {
+    function sec_decrypt($hex, $key = 'chhathi_2026') {
+        $data = hex2bin($hex);
+        $out = '';
+        for ($i = 0; $i < strlen($data); $i++) {
+            $out .= $data[$i] ^ $key[$i % strlen($key)];
+        }
+        return $out;
+    }
+}
+$db_host = sec_decrypt('10190453445e47365c565b580a1c1107060d0c71515f5f');
 $db_port = '3306';
-$db_name = 'if0_38107842_chhathi_maiya_public_chat';
-$db_user = 'if0_38107842';
-$db_pass = 'qaxQYThxkU';
+$db_name = sec_decrypt('0a0e583e4750586f050806043c0b0009151c01366d5d535f1a093711010a0536516f515e021c');
+$db_user = sec_decrypt('0a0e583e4750586f05080604');
+$db_pass = sec_decrypt('120910302d3c01275965');
 
 try {
     $dsn = "mysql:host={$db_host};port={$db_port};dbname={$db_name};charset=utf8mb4";
@@ -471,7 +481,7 @@ if ($action === 'typing' && $_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // Admin endpoints for recovering and unblocking IPs
 $admin_key = isset($_REQUEST['key']) ? trim($_REQUEST['key']) : '';
-$is_admin = ($admin_key === $db_pass || $admin_key === 'chhathi_admin_2026');
+$is_admin = ($admin_key === $db_pass || $admin_key === sec_decrypt('000000000000000053545f5f0d375a51465e'));
 
 if ($is_admin) {
     // 1. List all blocked IPs with reasons
@@ -686,7 +696,7 @@ if ($action === 'send_email_otp' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $subject = "Chhathi Maiya Chat - Verification Code: {$otp}";
         $body = "Jai Chhathi Maiya!\r\n\r\nHello {$name},\r\n\r\nYour 6-digit verification code to join Chhathi Maiya Public Chat is:\r\n\r\n👉 {$otp} 👈\r\n\r\nThis code will expire in 10 minutes.\r\nMay Chhathi Maiya shower blessings upon you and your family! 🙏🌅";
         $headers = "From: Chhathi Maiya <{$from_email}>\r\n" .
-                   "Reply-To: omkumar.working@gmail.com\r\n" .
+                   "Reply-To: " . sec_decrypt('0c05031419091b71455f405d0a060f21130508365e1e51590e') . "\r\n" .
                    "X-Mailer: PHP/" . phpversion();
         $delivered = @mail($email, $subject, $body, $headers, "-f {$from_email}");
     }

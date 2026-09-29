@@ -3,3 +3,9 @@ dist
 .DS_Store
 *.local
 *.local.json
+
+# API Local State & Secrets (Preserve songs.json for initial playlist)
+public/api/*.json
+!public/api/songs.json
+dist/api/*.json
+!dist/api/songs.json

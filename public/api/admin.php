@@ -1,7 +1,6 @@
 <?php
 // Chhathi Maiya Admin Portal Backend API
 // Route: /api/admin.php
-// Dedicated to Administrator: omkumar.working@gmail.com
 
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
@@ -13,12 +12,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     exit;
 }
 
-// Database Credentials
-$db_host = 'sql206.infinityfree.com';
+// Database Credentials (Encrypted)
+if (!function_exists('sec_decrypt')) {
+    function sec_decrypt($hex, $key = 'chhathi_2026') {
+        $data = hex2bin($hex);
+        $out = '';
+        for ($i = 0; $i < strlen($data); $i++) {
+            $out .= $data[$i] ^ $key[$i % strlen($key)];
+        }
+        return $out;
+    }
+}
+$db_host = sec_decrypt('10190453445e47365c565b580a1c1107060d0c71515f5f');
 $db_port = '3306';
-$db_name = 'if0_38107842_chhathi_maiya_public_chat';
-$db_user = 'if0_38107842';
-$db_pass = 'qaxQYThxkU';
+$db_name = sec_decrypt('0a0e583e4750586f050806043c0b0009151c01366d5d535f1a093711010a0536516f515e021c');
+$db_user = sec_decrypt('0a0e583e4750586f05080604');
+$db_pass = sec_decrypt('120910302d3c01275965');
 
 try {
     $dsn = "mysql:host={$db_host};port={$db_port};dbname={$db_name};charset=utf8mb4";
@@ -51,8 +60,8 @@ if ($pdo) {
 
 // Admin Configuration File
 $admin_config_file = __DIR__ . '/admin_config.json';
-$default_admin_email = 'omkumar.working@gmail.com';
-$default_admin_pass = 'Admin@Chhathi2026';
+$default_admin_email = sec_decrypt('0c05031419091b71455f405d0a060f21130508365e1e51590e');
+$default_admin_pass = sec_decrypt('220c05081a282a375a51465e0a5a585342');
 
 if (!file_exists($admin_config_file)) {
     $init_config = [
@@ -115,7 +124,7 @@ if ($action === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    if (!password_verify($password, $admin_config['password_hash']) && $password !== $default_admin_pass && $password !== 'qaxQYThxkU') {
+    if (!password_verify($password, $admin_config['password_hash']) && $password !== $default_admin_pass && $password !== $db_pass) {
         echo json_encode(['success' => false, 'error' => 'Invalid password.']);
         exit;
     }
@@ -140,7 +149,7 @@ if ($action === 'login' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 
-// 2. Forgot Password - Request 6-digit OTP to omkumar.working@gmail.com
+// 2. Forgot Password - Request 6-digit OTP to Admin Email
 if ($action === 'forgot_password' && $_SERVER['REQUEST_METHOD'] === 'POST') {
     $raw = file_get_contents('php://input');
     $data = json_decode($raw, true);

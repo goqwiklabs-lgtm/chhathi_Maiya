@@ -1,5 +1,5 @@
 -- phpMyAdmin SQL Dump
--- Database: if0_38107842_chhathi_maiya_public_chat
+-- Database: chhathi_maiya_public_chat
 -- Table structure for: chat_messages & blocked_ips
 
 SET SQL_MODE = "NO_AUTO_VALUE_ON_ZERO";
