@@ -1,0 +1,98 @@
+[
+    {
+        "timestamp": "2026-09-29 07:58:49",
+        "to": "omkumar.working@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 07:59:04",
+        "to": "",
+        "type": "admin",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 08:02:57",
+        "to": "connect.omkumar@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 08:03:25",
+        "to": "go.qwiklabs@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 08:10:29",
+        "to": "go.qwiklabs@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 08:16:55",
+        "to": "go.qwiklabs@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 08:22:43",
+        "to": "go.qwiklabs@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    },
+    {
+        "timestamp": "2026-09-29 08:28:27",
+        "to": "go.qwiklabs@gmail.com",
+        "type": "devotee",
+        "delivered": false,
+        "provider": "none",
+        "errors": {
+            "brevo_api": "HTTP 401: {\"message\":\"We have detected you are using an unrecognised IP address 13.71.3.99. If you performed this action make sure to add the new IP address in this link: https:\/\/app.brevo.com\/security\/authorised_ips\",\"code\":\"unauthorized\"}\n",
+            "smtp_auth": "525 5.7.1 Unauthorized IP address",
+            "php_mail": "mail() returned false"
+        }
+    }
+]
